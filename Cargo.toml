@@ -10,9 +10,16 @@ name = "async_dependency_installer_for_r"
 name = "async_dependency_installer_for_R"
 path = "src/main.rs"
 
+[[bin]]
+name = "du_hast_r"
+path = "src/du_hast_r.rs"
+
 [dependencies]
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 futures = "0.3"
 hex = "0.4"
+indicatif = "0.17"
 md-5 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["http2", "json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }

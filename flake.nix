@@ -78,6 +78,9 @@
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.openssl pkgs.curl pkgs.libuv pkgs.zlib pkgs.libxml2 pkgs.sqlite pkgs.freetype pkgs.libpng pkgs.libjpeg pkgs.libtiff pkgs.libwebp pkgs.lerc pkgs.harfbuzz pkgs.fribidi pkgs.fontconfig pkgs.glib pkgs.icu ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             mkdir -p "$CCACHE_DIR" "$CARGO_HOME"
             export PATH="$PWD/target/debug:$PATH"
+            if [ ! -x "$PWD/target/debug/du_hast_r" ]; then
+              cargo build --bin du_hast_r >/dev/null 2>&1 || true
+            fi
             echo "dev shell ready"
             echo "R: $(R --version | head -n 1)"
             echo "Rust: $(rustc --version)"

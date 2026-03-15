@@ -51,6 +51,77 @@ or
 cat request.json | cargo run --
 ```
 
+## du_hast_r CLI
+
+This repository now includes a modern package-manager CLI:
+
+- binary: `du_hast_r`
+- manifest: `fer.json`
+- lockfile: `nein.lock`
+
+Create a new manifest:
+
+```bash
+du_hast_r init
+```
+
+Generate lockfile:
+
+```bash
+du_hast_r lock
+```
+
+Install from lockfile (`gefragt` is the install verb):
+
+```bash
+du_hast_r gefragt fer.json
+```
+
+Show full compiler/install logs when needed:
+
+```bash
+du_hast_r --verbose gefragt fer.json
+```
+
+Remove dependency from manifest (`nein` is the delete verb):
+
+```bash
+du_hast_r nein Seurat fer.json --lock
+```
+
+Import existing project metadata:
+
+```bash
+du_hast_r import --from renv.lock fer.json
+du_hast_r import --from DESCRIPTION fer.json
+```
+
+Generate shell completion scripts:
+
+```bash
+du_hast_r completions zsh > _du_hast_r
+du_hast_r completions bash > du_hast_r.bash
+```
+
+Example `fer.json`:
+
+```json
+{
+  "name": "my-neuro-project",
+  "version": "0.1.0",
+  "settings": {
+    "download_threads": 16,
+    "install_ncpus": 4,
+    "make_jobs": 4
+  },
+  "dependencies": {
+    "BiocGenerics": "0.56.0",
+    "scater": "1.38.0",
+    "scran": "1.38.1"
+  }
+}
+```
+
 ## R orchestration
 
 The repository now includes an R shim in [R/async_install.R](/home/achref/Document/async_dependency_installer_for_R/R/async_install.R) that:

@@ -1,0 +1,80 @@
+{
+  "generated_at_utc": "2026-03-15 22:43:31 UTC",
+  "lock_version": 1,
+  "manifest_path": "fer.json",
+  "manifest_sha256": "6306ed38dbfa4235b3dcc16d29b9563b60b296b936505587457c4fad35903194",
+  "plan": {
+    "layers": [
+      [
+        "cli",
+        "digest",
+        "jsonlite"
+      ]
+    ],
+    "packages": [
+      {
+        "artifact_name": "jsonlite_2.0.0.tar.gz",
+        "checksum": {
+          "algorithm": "md5",
+          "value": "3e54e6fbc0c9063936e3d01e91419c14"
+        },
+        "package": "jsonlite",
+        "urls": [
+          "https://cloud.r-project.org/src/contrib/jsonlite_2.0.0.tar.gz"
+        ],
+        "version": "2.0.0"
+      },
+      {
+        "artifact_name": "digest_0.6.39.tar.gz",
+        "checksum": {
+          "algorithm": "md5",
+          "value": "2b7268922b0f86dbc8064ff8e3a1ca1b"
+        },
+        "package": "digest",
+        "urls": [
+          "https://cloud.r-project.org/src/contrib/digest_0.6.39.tar.gz"
+        ],
+        "version": "0.6.39"
+      },
+      {
+        "artifact_name": "cli_3.6.5.tar.gz",
+        "checksum": {
+          "algorithm": "md5",
+          "value": "bb08a624eeaa431d766e15309fb59ee8"
+        },
+        "package": "cli",
+        "urls": [
+          "https://cloud.r-project.org/src/contrib/cli_3.6.5.tar.gz"
+        ],
+        "version": "3.6.5"
+      }
+    ]
+  },
+  "project": {
+    "name": "du_hast_r_project",
+    "version": "0.1.0"
+  },
+  "requested_versions": {
+    "cli": "3.6.5",
+    "digest": "0.6.39",
+    "jsonlite": "2.0.0"
+  },
+  "roots": [
+    "jsonlite",
+    "digest",
+    "cli"
+  ],
+  "settings": {
+    "download_threads": 16,
+    "install_ncpus": 2,
+    "make_jobs": 4,
+    "repos": {
+      "BioCann": "https://bioconductor.org/packages/3.22/data/annotation",
+      "BioCbooks": "https://bioconductor.org/packages/3.22/books",
+      "BioCexp": "https://bioconductor.org/packages/3.22/data/experiment",
+      "BioCsoft": "https://bioconductor.org/packages/3.22/bioc",
+      "BioCworkflows": "https://bioconductor.org/packages/3.22/workflows",
+      "CRAN": "https://cloud.r-project.org"
+    }
+  }
+}

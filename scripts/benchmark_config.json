@@ -31,7 +31,7 @@
       "oro.nifti",
       "neurobase",
       "fslr",
-      "ANTsRCore",
+      "RNiftyReg",
       "terra",
       "sf"
     ],
@@ -42,7 +42,7 @@
       "bayesplot",
       "posterior",
       "loo",
-      "cmdstanr"
+      "StanHeaders"
     ]
   }
 }

@@ -1,0 +1,15 @@
+{
+  "name": "du_hast_r_project",
+  "version": "0.1.0",
+  "settings": {
+    "download_threads": 16,
+    "install_ncpus": 2,
+    "make_jobs": 4,
+    "repos": {}
+  },
+  "dependencies": {
+      "jsonlite": "2.0.0",
+      "digest": "0.6.39",
+      "cli": "3.6.5"
+  }
+}

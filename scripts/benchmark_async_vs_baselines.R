@@ -513,6 +513,43 @@ write_results <- function(results, out_dir, config) {
   write.csv(rows, file = csv_path, row.names = FALSE)
 }
 
+validate_stack_packages <- function(stacks, repos, dependency_fields, include_suggests) {
+  # Keep signature aligned with benchmark config knobs even though availability check
+  # currently depends only on resolved repository metadata.
+  invisible(dependency_fields)
+  invisible(include_suggests)
+  metadata <- available_source_packages(repos)
+  missing_by_stack <- list()
+
+  for (stack_name in names(stacks)) {
+    packages <- unique(unlist(stacks[[stack_name]]))
+    missing <- setdiff(packages, rownames(metadata))
+    if (length(missing) > 0) {
+      missing_by_stack[[stack_name]] <- missing
+    }
+  }
+
+  if (length(missing_by_stack) > 0) {
+    details <- vapply(
+      names(missing_by_stack),
+      function(stack_name) {
+        sprintf("%s -> %s", stack_name, paste(sort(missing_by_stack[[stack_name]]), collapse = ", "))
+      },
+      character(1)
+    )
+    stop(
+      paste(
+        "Preflight failed: some requested packages are not available in configured repositories.",
+        paste(details, collapse = " | "),
+        sep = "\n"
+      ),
+      call. = FALSE
+    )
+  }
+
+  invisible(TRUE)
+}
+
 run_benchmark <- function(config, out_dir) {
   repos <- default_repositories(include_bioconductor = isTRUE(config$include_bioconductor))
   benchmark_root <- safe_path(out_dir)
@@ -526,6 +563,12 @@ run_benchmark <- function(config, out_dir) {
   idx <- 1L
 
   stacks <- config$stacks
+  validate_stack_packages(
+    stacks = stacks,
+    repos = repos,
+    dependency_fields = unlist(config$dependency_fields),
+    include_suggests = isTRUE(config$include_suggests)
+  )
   for (stack_name in names(stacks)) {
     packages <- unlist(stacks[[stack_name]])
     stack_root <- file.path(benchmark_root, stack_name)

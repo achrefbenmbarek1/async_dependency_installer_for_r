@@ -85,6 +85,9 @@
             export PKG_CONFIG_PATH="${pkgs.lib.getDev pkgs.openssl}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libxml2}/lib/pkgconfig:${pkgs.lib.getDev pkgs.curl}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libuv}/lib/pkgconfig:${pkgs.lib.getDev pkgs.zlib}/lib/pkgconfig:${pkgs.lib.getDev pkgs.sqlite}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libtiff}/lib/pkgconfig:${pkgs.lib.getDev pkgs.freetype}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libpng}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libjpeg}/lib/pkgconfig:${pkgs.lib.getDev pkgs.libwebp}/lib/pkgconfig:${pkgs.lib.getDev pkgs.lerc}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
             export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath [ pkgs.openssl pkgs.curl pkgs.libuv pkgs.zlib pkgs.libxml2 pkgs.sqlite pkgs.freetype pkgs.libpng pkgs.libjpeg pkgs.libtiff pkgs.libwebp pkgs.lerc pkgs.harfbuzz pkgs.fribidi pkgs.fontconfig pkgs.glib pkgs.icu ]}''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             export PATH="$PROJECT_ROOT/target/debug:$PATH"
+            if [ ! -x "$PROJECT_ROOT/target/debug/du_hast_r" ]; then
+              cargo build --bin du_hast_r >/dev/null 2>&1 || true
+            fi
 
             cat <<EOF
 turbo dev shell ready
