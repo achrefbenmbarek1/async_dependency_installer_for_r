@@ -14,6 +14,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Gauge, List, ListItem, Paragraph},
 };
+use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -187,8 +188,43 @@ struct TuiState {
     install_pct: u16,
     metrics: PhaseMetrics,
     logs: VecDeque<String>,
+    packages: BTreeMap<String, PackageActivity>,
+    current_package: Option<String>,
+    download_threads: u64,
+    install_threads: u64,
+    active_phase: String,
+    core_count: usize,
+    f_prefix_pending: bool,
+    input_mode: InputMode,
+    package_search: String,
+    log_search: String,
+    package_search_error: Option<String>,
+    log_search_error: Option<String>,
     started: Instant,
     completed: bool,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PackageActivity {
+    downloaded: bool,
+    installing: bool,
+    compiling: bool,
+    done: bool,
+    last_note: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum InputMode {
+    #[default]
+    Normal,
+    PackageSearch,
+    LogSearch,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyAction {
+    None,
+    Quit,
 }
 
 impl TuiState {
@@ -201,15 +237,69 @@ impl TuiState {
             install_pct: 3,
             metrics: PhaseMetrics::default(),
             logs: VecDeque::new(),
+            packages: BTreeMap::new(),
+            current_package: None,
+            download_threads: 0,
+            install_threads: 0,
+            active_phase: "resolve".to_string(),
+            core_count: std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1),
+            f_prefix_pending: false,
+            input_mode: InputMode::Normal,
+            package_search: String::new(),
+            log_search: String::new(),
+            package_search_error: None,
+            log_search_error: None,
             started: Instant::now(),
             completed: false,
         }
     }
 
     fn push_log(&mut self, entry: String) {
+        self.track_package_from_line(&entry);
         self.logs.push_back(entry);
         if self.logs.len() > MAX_LOG_LINES {
             let _ = self.logs.pop_front();
+        }
+    }
+
+    fn track_package_from_line(&mut self, line: &str) {
+        let lower = line.to_lowercase();
+        if let Some(name) = extract_pkg_from_tarball(line) {
+            let entry = self.packages.entry(name).or_default();
+            entry.downloaded = true;
+            entry.last_note = "artifact staged".to_string();
+        }
+        if let Some(name) = extract_install_pkg(line) {
+            self.current_package = Some(name.clone());
+            let entry = self.packages.entry(name).or_default();
+            entry.installing = true;
+            entry.last_note = "installing".to_string();
+        } else if lower.contains("** libs") || lower.contains("compil") {
+            if let Some(pkg) = &self.current_package {
+                let entry = self.packages.entry(pkg.clone()).or_default();
+                entry.compiling = true;
+                entry.last_note = "compiling native code".to_string();
+            }
+        } else if lower.contains("* done")
+            || lower.contains("installation of package")
+            || lower.contains("byte-compile")
+        {
+            if let Some(pkg) = &self.current_package {
+                let entry = self.packages.entry(pkg.clone()).or_default();
+                entry.done = true;
+                entry.installing = false;
+                entry.last_note = "installed".to_string();
+            }
+        }
+    }
+
+    fn active_threads(&self) -> u64 {
+        match self.active_phase.as_str() {
+            "fetch" => self.download_threads.max(1),
+            "install" => self.install_threads.max(1),
+            _ => 1,
         }
     }
 }
@@ -697,7 +787,7 @@ fn run_with_tui(command: &mut Command, mode: &str, verbose: bool) -> Result<Phas
         if event::poll(TUI_TICK).map_err(|e| format!("failed to poll terminal input: {e}"))? {
             if let CEvent::Key(key) = event::read().map_err(|e| format!("failed to read terminal input: {e}"))?
             {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
+                if key.kind == KeyEventKind::Press && handle_tui_key(&mut state, key.code) == KeyAction::Quit {
                     let _ = child.kill();
                     let details = if state.logs.is_empty() {
                         "<no command output captured>".to_string()
@@ -730,7 +820,7 @@ fn run_with_tui(command: &mut Command, mode: &str, verbose: bool) -> Result<Phas
                     state.completed = true;
                     state.metrics.total_seconds = Some(state.started.elapsed().as_secs_f64());
                     session.draw(&state)?;
-                    wait_for_q_to_exit(&mut session, &state)?;
+                    wait_for_q_to_exit(&mut session, &mut state)?;
                     drop(session);
                     if verbose {
                         for line in state.logs {
@@ -887,6 +977,7 @@ fn apply_event(
 fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
     match (event.phase.as_str(), event.status.as_str()) {
         ("resolve", "start") => {
+            state.active_phase = "resolve".to_string();
             state.resolve_pct = 15;
             state.phase_message = format!("resolving {} roots", event.total_roots.unwrap_or(0));
         }
@@ -899,11 +990,14 @@ fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
             );
         }
         ("fetch", "start") => {
+            state.active_phase = "fetch".to_string();
             state.fetch_pct = 14;
+            state.download_threads = event.threads.unwrap_or(1);
             state.phase_message = format!("fetch started ({} threads)", event.threads.unwrap_or(0));
         }
         ("fetch", "done") => {
             state.fetch_pct = 100;
+            state.active_phase = "install".to_string();
             let secs = event.seconds.unwrap_or(0.0);
             let dl = event.downloaded_bytes.unwrap_or(0);
             let reused = event.reused_bytes.unwrap_or(0);
@@ -921,8 +1015,14 @@ fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
             state.metrics.cache_hit_rate = Some(event.cache_hit_rate.unwrap_or(0.0));
         }
         ("install", "start") => {
+            state.active_phase = "install".to_string();
+            state.install_threads = event.threads.unwrap_or(1);
             state.install_pct = 8;
-            state.phase_message = format!("install started ({} layers)", event.layers.unwrap_or(0));
+            state.phase_message = format!(
+                "install started ({} layers, {} threads)",
+                event.layers.unwrap_or(0),
+                state.install_threads
+            );
         }
         ("install", "target") => {
             if let Some(lib) = &event.lib {
@@ -948,9 +1048,17 @@ fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
         ("install", "done") => {
             state.install_pct = 100;
             state.metrics.install_seconds = event.seconds;
+            for entry in state.packages.values_mut() {
+                if entry.installing || entry.compiling {
+                    entry.done = true;
+                    entry.installing = false;
+                    entry.last_note = "installed".to_string();
+                }
+            }
             state.phase_message = format!("install complete in {:.2}s", event.seconds.unwrap_or(0.0));
         }
         ("done", "done") => {
+            state.active_phase = "done".to_string();
             state.metrics.total_seconds = event.total_seconds;
             state.phase_message = "all phases complete".to_string();
         }
@@ -962,15 +1070,107 @@ fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
     }
 }
 
+fn handle_tui_key(state: &mut TuiState, code: KeyCode) -> KeyAction {
+    match state.input_mode {
+        InputMode::PackageSearch => match code {
+            KeyCode::Esc | KeyCode::Enter => {
+                state.input_mode = InputMode::Normal;
+                state.package_search_error = None;
+                state.f_prefix_pending = false;
+            }
+            KeyCode::Backspace => {
+                state.package_search.pop();
+                state.package_search_error = compile_regex_error(&state.package_search);
+            }
+            KeyCode::Char(c) => {
+                state.package_search.push(c);
+                state.package_search_error = compile_regex_error(&state.package_search);
+            }
+            _ => {}
+        },
+        InputMode::LogSearch => match code {
+            KeyCode::Esc | KeyCode::Enter => {
+                state.input_mode = InputMode::Normal;
+                state.log_search_error = None;
+                state.f_prefix_pending = false;
+            }
+            KeyCode::Backspace => {
+                state.log_search.pop();
+                state.log_search_error = compile_regex_error(&state.log_search);
+            }
+            KeyCode::Char(c) => {
+                state.log_search.push(c);
+                state.log_search_error = compile_regex_error(&state.log_search);
+            }
+            _ => {}
+        },
+        InputMode::Normal => match code {
+            KeyCode::Char('q') => return KeyAction::Quit,
+            KeyCode::Esc => {
+                state.f_prefix_pending = false;
+            }
+            KeyCode::Char('f') => {
+                state.f_prefix_pending = true;
+            }
+            KeyCode::Char('p') if state.f_prefix_pending => {
+                state.f_prefix_pending = false;
+                state.input_mode = InputMode::PackageSearch;
+                state.package_search_error = compile_regex_error(&state.package_search);
+            }
+            KeyCode::Char('l') if state.f_prefix_pending => {
+                state.f_prefix_pending = false;
+                state.input_mode = InputMode::LogSearch;
+                state.log_search_error = compile_regex_error(&state.log_search);
+            }
+            _ => {
+                state.f_prefix_pending = false;
+            }
+        },
+    }
+    KeyAction::None
+}
+
+fn compile_regex(query: &str) -> Option<Regex> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    RegexBuilder::new(query).case_insensitive(true).build().ok()
+}
+
+fn compile_regex_error(query: &str) -> Option<String> {
+    if query.trim().is_empty() {
+        return None;
+    }
+    RegexBuilder::new(query)
+        .case_insensitive(true)
+        .build()
+        .err()
+        .map(|e| e.to_string())
+}
+
+fn extract_install_pkg(line: &str) -> Option<String> {
+    let re = Regex::new(r#"(?i)installing .* package ['"`]?([A-Za-z][A-Za-z0-9._]+)"#).ok()?;
+    re.captures(line)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
+fn extract_pkg_from_tarball(line: &str) -> Option<String> {
+    let re = Regex::new(r"([A-Za-z][A-Za-z0-9._]+)_[0-9][A-Za-z0-9._-]*\.tar\.gz").ok()?;
+    re.captures(line)
+        .and_then(|caps| caps.get(1))
+        .map(|m| m.as_str().to_string())
+}
+
 fn draw_tui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
             Constraint::Length(11),
-            Constraint::Length(7),
-            Constraint::Min(6),
-            Constraint::Length(1),
+            Constraint::Length(8),
+            Constraint::Min(8),
+            Constraint::Length(3),
         ])
         .split(frame.area());
 
@@ -1001,6 +1201,11 @@ fn draw_tui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
         gauges[2],
     );
 
+    let middle = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(64), Constraint::Percentage(36)])
+        .split(chunks[2]);
+
     let stats = vec![
         Line::from(format!(
             "total: {:>7}  fetch: {:>7}  install: {:>7}",
@@ -1025,38 +1230,125 @@ fn draw_tui(frame: &mut ratatui::Frame<'_>, state: &TuiState) {
     ];
     let stats_panel =
         Paragraph::new(stats).block(Block::default().title("Metrics").borders(Borders::ALL));
-    frame.render_widget(stats_panel, chunks[2]);
+    frame.render_widget(stats_panel, middle[0]);
 
-    let log_items: Vec<ListItem<'_>> = state
+    let active_threads = state.active_threads();
+    let overall_util = ((active_threads as f64 / state.core_count.max(1) as f64) * 100.0)
+        .clamp(0.0, 100.0);
+    let core_lines = estimated_core_usage(state.core_count, active_threads)
+        .into_iter()
+        .enumerate()
+        .take(6)
+        .map(|(idx, pct)| Line::from(format!("core {:>2}: {:>3}%", idx + 1, pct)))
+        .collect::<Vec<_>>();
+    let mut thread_lines = vec![Line::from(format!(
+        "active threads: {}  | cores: {}",
+        active_threads, state.core_count
+    ))];
+    thread_lines.push(Line::from(format!("overall est utilization: {:>5.1}%", overall_util)));
+    thread_lines.extend(core_lines);
+    let thread_panel = Paragraph::new(thread_lines).block(
+        Block::default()
+            .title("Threads / Core Util (Estimated)")
+            .borders(Borders::ALL),
+    );
+    frame.render_widget(thread_panel, middle[1]);
+
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(chunks[3]);
+
+    let package_filter = compile_regex(&state.package_search);
+    let package_items: Vec<ListItem<'_>> = state
+        .packages
+        .iter()
+        .filter(|(name, _)| package_filter.as_ref().is_none_or(|re| re.is_match(name)))
+        .take(bottom[0].height.saturating_sub(2) as usize)
+        .map(|(name, pkg)| {
+            ListItem::new(format!(
+                "{:<24} dl:{} in:{} cc:{} ok:{} | {}",
+                truncate_for_panel(name, 24),
+                yes_no(pkg.downloaded),
+                yes_no(pkg.installing),
+                yes_no(pkg.compiling),
+                yes_no(pkg.done),
+                pkg.last_note
+            ))
+        })
+        .collect();
+    let package_title = if state.package_search.trim().is_empty() {
+        "Packages".to_string()
+    } else {
+        format!("Packages (regex: {})", state.package_search)
+    };
+    let packages = List::new(package_items)
+        .block(Block::default().title(package_title).borders(Borders::ALL));
+    frame.render_widget(packages, bottom[0]);
+
+    let log_filter = compile_regex(&state.log_search);
+    let filtered_logs: Vec<&String> = state
         .logs
         .iter()
-        .rev()
-        .take(chunks[3].height.saturating_sub(2) as usize)
-        .rev()
-        .map(|line| ListItem::new(line.clone()))
+        .filter(|line| log_filter.as_ref().is_none_or(|re| re.is_match(line)))
         .collect();
-    let logs = List::new(log_items).block(Block::default().title("Logs").borders(Borders::ALL));
-    frame.render_widget(logs, chunks[3]);
-
-    let footer_text = if state.completed {
-        "completed at 100% | press q to exit"
+    let visible_logs = bottom[1].height.saturating_sub(2) as usize;
+    let start_idx = filtered_logs.len().saturating_sub(visible_logs);
+    let log_items: Vec<ListItem<'_>> = filtered_logs[start_idx..]
+        .iter()
+        .map(|line| ListItem::new((*line).clone()))
+        .collect();
+    let log_title = if state.log_search.trim().is_empty() {
+        "Logs".to_string()
     } else {
-        "q: abort run"
+        format!("Logs (regex: {})", state.log_search)
+    };
+    let logs = List::new(log_items).block(Block::default().title(log_title).borders(Borders::ALL));
+    frame.render_widget(logs, bottom[1]);
+
+    let footer_text = match state.input_mode {
+        InputMode::PackageSearch => format!(
+            "Search Packages (regex): {}{}",
+            state.package_search,
+            state
+                .package_search_error
+                .as_ref()
+                .map(|e| format!("  [invalid: {}]", truncate_for_panel(e, 36)))
+                .unwrap_or_default()
+        ),
+        InputMode::LogSearch => format!(
+            "Search Logs (regex): {}{}",
+            state.log_search,
+            state
+                .log_search_error
+                .as_ref()
+                .map(|e| format!("  [invalid: {}]", truncate_for_panel(e, 36)))
+                .unwrap_or_default()
+        ),
+        InputMode::Normal => {
+            if state.f_prefix_pending {
+                "command mode: f + p (package search), f + l (log search), q (quit)".to_string()
+            } else if state.completed {
+                "completed at 100% | q (quit) | f then p/l search panels".to_string()
+            } else {
+                "q (abort), f then p (package search), f then l (log search)".to_string()
+            }
+        }
     };
     let footer = Paragraph::new(footer_text)
         .style(Style::default().fg(Color::DarkGray))
-        .block(Block::default());
+        .block(Block::default().title("Command").borders(Borders::ALL));
     frame.render_widget(footer, chunks[4]);
 }
 
-fn wait_for_q_to_exit(session: &mut TuiSession, state: &TuiState) -> Result<(), String> {
+fn wait_for_q_to_exit(session: &mut TuiSession, state: &mut TuiState) -> Result<(), String> {
     loop {
         session.draw(state)?;
         if event::poll(TUI_TICK).map_err(|e| format!("failed to poll terminal input: {e}"))? {
             if let CEvent::Key(key) =
                 event::read().map_err(|e| format!("failed to read terminal input: {e}"))?
             {
-                if key.kind == KeyEventKind::Press && key.code == KeyCode::Char('q') {
+                if key.kind == KeyEventKind::Press && handle_tui_key(state, key.code) == KeyAction::Quit {
                     return Ok(());
                 }
             }
@@ -1087,6 +1379,36 @@ fn format_percent(value: Option<f64>) -> String {
     value
         .map(|v| format!("{:.1}%", v * 100.0))
         .unwrap_or_else(|| "--".to_string())
+}
+
+fn estimated_core_usage(core_count: usize, threads: u64) -> Vec<u16> {
+    let mut remaining = threads as f64;
+    let mut usage = Vec::with_capacity(core_count);
+    for _ in 0..core_count {
+        if remaining >= 1.0 {
+            usage.push(100);
+            remaining -= 1.0;
+        } else if remaining > 0.0 {
+            usage.push((remaining * 100.0).round() as u16);
+            remaining = 0.0;
+        } else {
+            usage.push(0);
+        }
+    }
+    usage
+}
+
+fn yes_no(flag: bool) -> &'static str {
+    if flag { "Y" } else { "N" }
+}
+
+fn truncate_for_panel(text: &str, max: usize) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    if chars.len() <= max {
+        return text.to_string();
+    }
+    let keep = max.saturating_sub(3);
+    chars.into_iter().take(keep).collect::<String>() + "..."
 }
 
 fn print_metrics(metrics: PhaseMetrics) {

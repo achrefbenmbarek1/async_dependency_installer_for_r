@@ -84,6 +84,10 @@ du_hast_r --tui gefragt fer.json
 ```
 
 In TUI mode, press `q` to abort while running, and after success the 100% screen stays open until you press `q` to exit.
+Command-mode shortcuts:
+- `f` then `p`: package panel regex search (by package name)
+- `f` then `l`: log panel regex search
+- `Esc` or `Enter`: leave search mode
 
 Show full compiler/install logs when needed:
 

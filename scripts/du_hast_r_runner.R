@@ -244,7 +244,13 @@ if (mode == "lock") {
   }
 
   total_packages <- length(plan$package_specs)
-  emit_event("install", "start", layers = length(plan$layers), total_packages = total_packages)
+  emit_event(
+    "install",
+    "start",
+    layers = length(plan$layers),
+    total_packages = total_packages,
+    threads = as.integer(install_ncpus)
+  )
   completed_packages <- 0L
   t_install <- system.time({
     for (idx in seq_along(plan$layers)) {
