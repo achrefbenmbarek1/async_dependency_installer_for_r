@@ -1,6 +1,13 @@
 {
   "cache_dir": "/tmp/r-artifact-cache",
   "concurrency": 8,
+  "dynamic": {
+    "enabled": false,
+    "mode": "shared_server",
+    "min_concurrency": 1,
+    "max_concurrency": 12,
+    "rebalance_interval_ms": 1500
+  },
   "packages": [
     {
       "package": "BiocGenerics",

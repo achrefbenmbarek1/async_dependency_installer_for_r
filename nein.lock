@@ -1,8 +1,8 @@
 {
-  "generated_at_utc": "2026-03-19 07:53:45 UTC",
+  "generated_at_utc": "2026-03-21 21:21:07 UTC",
   "lock_version": 1,
   "manifest_path": "fer.json",
-  "manifest_sha256": "6306ed38dbfa4235b3dcc16d29b9563b60b296b936505587457c4fad35903194",
+  "manifest_sha256": "771c99a110ed500d3fd73e435e6d794153ee4ed5c853305a601be9d7c830bd66",
   "plan": {
     "layers": [
       [
@@ -65,9 +65,8 @@
     "cli"
   ],
   "settings": {
-    "download_threads": 16,
-    "install_ncpus": 2,
-    "make_jobs": 4,
+    "dynamic_mode": "shared_server",
+    "dynamics": false,
     "repos": {
       "BioCann": "https://bioconductor.org/packages/3.22/data/annotation",
       "BioCbooks": "https://bioconductor.org/packages/3.22/books",

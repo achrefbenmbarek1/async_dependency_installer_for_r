@@ -18,6 +18,7 @@ use regex::{Regex, RegexBuilder};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use async_dependency_installer_for_r::DynamicMode;
 use std::collections::{BTreeMap, VecDeque};
 use std::fs;
 use std::io::{BufRead, BufReader, IsTerminal, Stdout, Write};
@@ -107,6 +108,10 @@ enum Shell {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ManifestSettings {
+    #[serde(default)]
+    dynamics: bool,
+    #[serde(default = "default_dynamic_mode")]
+    dynamic_mode: DynamicMode,
     #[serde(default = "default_download_threads")]
     download_threads: usize,
     #[serde(default = "default_install_ncpus")]
@@ -417,6 +422,8 @@ impl Drop for TuiSession {
 impl Default for ManifestSettings {
     fn default() -> Self {
         Self {
+            dynamics: false,
+            dynamic_mode: default_dynamic_mode(),
             download_threads: default_download_threads(),
             install_ncpus: default_install_ncpus(),
             make_jobs: default_make_jobs(),
@@ -444,14 +451,20 @@ fn default_name() -> String {
 fn default_version() -> String {
     "0.1.0".to_string()
 }
+fn default_dynamic_mode() -> DynamicMode {
+    DynamicMode::SharedServer
+}
 fn default_download_threads() -> usize {
-    16
+    // I'm optimizing for cran/bioconductor since it appears that most of their mirrors can only
+    // handle 4-8 concurrent connections
+    let logical_cpus = num_cpus::get();
+    (logical_cpus as f32 * 0.75).round().max(2.0).min(12.0) as usize
 }
 fn default_install_ncpus() -> usize {
-    2
+    num_cpus::get_physical().min(8)
 }
 fn default_make_jobs() -> usize {
-    4
+    num_cpus::get_physical().min(8)
 }
 
 fn main() {

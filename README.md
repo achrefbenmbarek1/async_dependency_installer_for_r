@@ -22,6 +22,13 @@ Pass a JSON request on `stdin` or as the first positional argument. The response
 {
   "cache_dir": "/tmp/r-artifact-cache",
   "concurrency": 8,
+  "dynamic": {
+    "enabled": true,
+    "mode": "shared_server",
+    "min_concurrency": 1,
+    "max_concurrency": 12,
+    "rebalance_interval_ms": 1500
+  },
   "packages": [
     {
       "package": "BiocGenerics",
@@ -126,6 +133,8 @@ Example `fer.json`:
   "name": "my-neuro-project",
   "version": "0.1.0",
   "settings": {
+    "dynamics": true,
+    "dynamic_mode": "shared_server",
     "download_threads": 16,
     "install_ncpus": 4,
     "make_jobs": 4,
@@ -138,6 +147,17 @@ Example `fer.json`:
   }
 }
 ```
+
+When `settings.dynamics` is `false`, the installer uses the fixed `download_threads`, `install_ncpus`, and `make_jobs` values.
+When `settings.dynamics` is `true`, those fixed values are ignored at runtime and replaced by:
+
+- live-rebalanced download concurrency in the Rust fetcher
+- batch-level install scheduling in the R runner
+
+`settings.dynamic_mode` controls the heuristic bias:
+
+- `shared_server`: leaves more CPU and memory headroom
+- `dedicated_builder`: pushes harder for throughput on a mostly dedicated machine
 
 Install location precedence for `du_hast_r gefragt`:
 - `settings.lib` in `fer.json` (if set and writable)

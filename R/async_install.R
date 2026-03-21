@@ -175,12 +175,16 @@ resolve_install_library <- function(lib = NULL) {
 run_fetcher <- function(plan,
                         cache_dir,
                         fetcher = "./target/debug/async_dependency_installer_for_R",
-                        download_concurrency = 16L) {
+                        download_concurrency = 16L,
+                        dynamic_config = NULL) {
   request <- list(
     cache_dir = normalizePath(cache_dir, winslash = "/", mustWork = FALSE),
     concurrency = as.integer(download_concurrency),
     packages = unname(plan$package_specs)
   )
+  if (!is.null(dynamic_config)) {
+    request$dynamic <- dynamic_config
+  }
 
   request_path <- tempfile("rust-fetch-request-", fileext = ".json")
   json <- jsonlite::toJSON(request, auto_unbox = TRUE, pretty = TRUE)

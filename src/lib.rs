@@ -1,19 +1,46 @@
-use futures::stream::{self, StreamExt};
 use md5::Md5;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use tokio::io::AsyncWriteExt;
-use tokio::sync::Semaphore;
+use tokio::sync::{Mutex, Notify};
+use tokio::time::{Duration, sleep};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FetchRequest {
     pub cache_dir: PathBuf,
     #[serde(default = "default_concurrency")]
     pub concurrency: usize,
+    #[serde(default)]
+    pub dynamic: Option<DynamicConcurrencyConfig>,
     pub packages: Vec<PackageRequest>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicConcurrencyConfig {
+    #[serde(default)]
+    pub enabled: bool,
+    #[serde(default = "default_dynamic_mode")]
+    pub mode: DynamicMode,
+    #[serde(default)]
+    pub min_concurrency: Option<usize>,
+    #[serde(default)]
+    pub max_concurrency: Option<usize>,
+    #[serde(default = "default_rebalance_interval_ms")]
+    pub rebalance_interval_ms: u64,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DynamicMode {
+    SharedServer,
+    DedicatedBuilder,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -92,25 +119,80 @@ impl Default for Fetcher {
 
 impl Fetcher {
     pub async fn fetch_all(&self, request: FetchRequest) -> FetchResponse {
-        let concurrency = request.concurrency.max(1);
         let cache_dir = request.cache_dir.clone();
-        let semaphore = Arc::new(Semaphore::new(concurrency));
-
-        let results = stream::iter(request.packages.into_iter().map(|package| {
-            let semaphore = Arc::clone(&semaphore);
-            let cache_dir = cache_dir.clone();
-            async move {
-                let permit = semaphore.acquire_owned().await.expect("semaphore closed");
-                let result = self.fetch_package(&cache_dir, package).await;
-                drop(permit);
-                result
-            }
-        }))
-        .buffer_unordered(concurrency)
-        .collect::<Vec<_>>()
-        .await;
+        let initial_concurrency = request.concurrency.max(1);
+        let dynamic = request.dynamic.filter(|cfg| cfg.enabled);
+        let results = self
+            .fetch_all_with_pool(cache_dir.clone(), request.packages, initial_concurrency, dynamic)
+            .await;
 
         FetchResponse { cache_dir, results }
+    }
+
+    async fn fetch_all_with_pool(
+        &self,
+        cache_dir: PathBuf,
+        packages: Vec<PackageRequest>,
+        initial_concurrency: usize,
+        dynamic: Option<DynamicConcurrencyConfig>,
+    ) -> Vec<PackageResult> {
+        if packages.is_empty() {
+            return Vec::new();
+        }
+
+        let total = packages.len();
+        let caps = WorkerCaps::from_request(initial_concurrency, total, dynamic.clone());
+        let target_concurrency = Arc::new(AtomicUsize::new(caps.initial));
+        let completed = Arc::new(AtomicUsize::new(0));
+        let notify = Arc::new(Notify::new());
+        let queue = Arc::new(Mutex::new(
+            packages
+                .into_iter()
+                .enumerate()
+                .collect::<VecDeque<(usize, PackageRequest)>>(),
+        ));
+        let results = Arc::new(Mutex::new(vec![None; total]));
+
+        let controller = dynamic.clone().map(|cfg| {
+            tokio::spawn(run_rebalance_controller(
+                cfg,
+                Arc::clone(&queue),
+                Arc::clone(&target_concurrency),
+                Arc::clone(&completed),
+                Arc::clone(&notify),
+                caps,
+                total,
+            ))
+        });
+
+        let mut workers = Vec::with_capacity(caps.max);
+        for worker_id in 0..caps.max {
+            workers.push(tokio::spawn(run_fetch_worker(
+                self.clone(),
+                cache_dir.clone(),
+                worker_id,
+                Arc::clone(&queue),
+                Arc::clone(&results),
+                Arc::clone(&target_concurrency),
+                Arc::clone(&completed),
+                Arc::clone(&notify),
+                total,
+            )));
+        }
+
+        for worker in workers {
+            worker.await.expect("fetch worker panicked");
+        }
+
+        if let Some(controller) = controller {
+            let _ = controller.await;
+        }
+
+        let mut locked = results.lock().await;
+        locked
+            .drain(..)
+            .map(|entry| entry.expect("fetch result should be populated"))
+            .collect()
     }
 
     async fn fetch_package(&self, cache_dir: &Path, package: PackageRequest) -> PackageResult {
@@ -238,6 +320,203 @@ struct CacheHit {
     bytes: u64,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct WorkerCaps {
+    min: usize,
+    max: usize,
+    initial: usize,
+}
+
+impl WorkerCaps {
+    fn from_request(
+        initial_concurrency: usize,
+        total_packages: usize,
+        dynamic: Option<DynamicConcurrencyConfig>,
+    ) -> Self {
+        let fallback_max = default_dynamic_max_concurrency(total_packages);
+        match dynamic {
+            Some(cfg) => {
+                let max = cfg
+                    .max_concurrency
+                    .unwrap_or(fallback_max)
+                    .max(1)
+                    .min(total_packages.max(1));
+                let min = cfg
+                    .min_concurrency
+                    .unwrap_or(1)
+                    .max(1)
+                    .min(max);
+                let initial = initial_concurrency.max(min).min(max);
+                Self { min, max, initial }
+            }
+            None => {
+                let fixed = initial_concurrency.max(1).min(total_packages.max(1));
+                Self {
+                    min: fixed,
+                    max: fixed,
+                    initial: fixed,
+                }
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct HostSnapshot {
+    logical_cpus: usize,
+    load_avg_1: Option<f64>,
+    mem_total_bytes: Option<u64>,
+    mem_available_bytes: Option<u64>,
+}
+
+async fn run_fetch_worker(
+    fetcher: Fetcher,
+    cache_dir: PathBuf,
+    worker_id: usize,
+    queue: Arc<Mutex<VecDeque<(usize, PackageRequest)>>>,
+    results: Arc<Mutex<Vec<Option<PackageResult>>>>,
+    target_concurrency: Arc<AtomicUsize>,
+    completed: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+    total: usize,
+) {
+    loop {
+        if completed.load(Ordering::Relaxed) >= total {
+            return;
+        }
+
+        let target = target_concurrency.load(Ordering::Relaxed).max(1);
+        if worker_id >= target {
+            tokio::select! {
+                _ = notify.notified() => {}
+                _ = sleep(Duration::from_millis(200)) => {}
+            }
+            continue;
+        }
+
+        let next = {
+            let mut locked = queue.lock().await;
+            locked.pop_front()
+        };
+
+        let Some((index, package)) = next else {
+            return;
+        };
+
+        let result = fetcher.fetch_package(&cache_dir, package).await;
+        {
+            let mut locked = results.lock().await;
+            locked[index] = Some(result);
+        }
+        completed.fetch_add(1, Ordering::Relaxed);
+        notify.notify_waiters();
+    }
+}
+
+async fn run_rebalance_controller(
+    config: DynamicConcurrencyConfig,
+    queue: Arc<Mutex<VecDeque<(usize, PackageRequest)>>>,
+    target_concurrency: Arc<AtomicUsize>,
+    completed: Arc<AtomicUsize>,
+    notify: Arc<Notify>,
+    caps: WorkerCaps,
+    total: usize,
+) {
+    let interval = Duration::from_millis(config.rebalance_interval_ms.max(250));
+    loop {
+        if completed.load(Ordering::Relaxed) >= total {
+            return;
+        }
+
+        let pending = {
+            let locked = queue.lock().await;
+            locked.len()
+        };
+        if pending == 0 {
+            return;
+        }
+
+        let snapshot = read_host_snapshot();
+        let suggested = suggest_dynamic_concurrency(snapshot, config.mode, caps, pending);
+        let current = target_concurrency.load(Ordering::Relaxed);
+        if suggested != current {
+            target_concurrency.store(suggested, Ordering::Relaxed);
+            notify.notify_waiters();
+        }
+
+        sleep(interval).await;
+    }
+}
+
+fn read_host_snapshot() -> HostSnapshot {
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|value| value.get())
+        .unwrap_or(1);
+    let meminfo = std::fs::read_to_string("/proc/meminfo").ok();
+    let loadavg = std::fs::read_to_string("/proc/loadavg").ok();
+    HostSnapshot {
+        logical_cpus,
+        load_avg_1: loadavg
+            .as_deref()
+            .and_then(|text| text.split_whitespace().next())
+            .and_then(|value| value.parse::<f64>().ok()),
+        mem_total_bytes: meminfo
+            .as_deref()
+            .and_then(|text| parse_meminfo_bytes(text, "MemTotal:")),
+        mem_available_bytes: meminfo
+            .as_deref()
+            .and_then(|text| parse_meminfo_bytes(text, "MemAvailable:")),
+    }
+}
+
+fn suggest_dynamic_concurrency(
+    snapshot: HostSnapshot,
+    mode: DynamicMode,
+    caps: WorkerCaps,
+    pending: usize,
+) -> usize {
+    let cpu_budget = match (mode, snapshot.load_avg_1) {
+        (DynamicMode::SharedServer, Some(load)) => {
+            ((snapshot.logical_cpus as f64 * 0.70) - load).floor() as isize
+        }
+        (DynamicMode::DedicatedBuilder, Some(load)) => {
+            ((snapshot.logical_cpus as f64 * 1.05) - load).floor() as isize
+        }
+        (DynamicMode::SharedServer, None) => (snapshot.logical_cpus as f64 * 0.60).floor() as isize,
+        (DynamicMode::DedicatedBuilder, None) => {
+            (snapshot.logical_cpus as f64 * 0.90).floor() as isize
+        }
+    };
+
+    let mut target = cpu_budget.max(1) as usize;
+    if let (Some(total_mem), Some(available_mem)) =
+        (snapshot.mem_total_bytes, snapshot.mem_available_bytes)
+    {
+        let available_ratio = available_mem as f64 / total_mem.max(1) as f64;
+        let mem_scale = match mode {
+            DynamicMode::SharedServer if available_ratio < 0.10 => 0.25,
+            DynamicMode::SharedServer if available_ratio < 0.20 => 0.50,
+            DynamicMode::SharedServer if available_ratio < 0.35 => 0.75,
+            DynamicMode::DedicatedBuilder if available_ratio < 0.08 => 0.25,
+            DynamicMode::DedicatedBuilder if available_ratio < 0.15 => 0.50,
+            DynamicMode::DedicatedBuilder if available_ratio < 0.25 => 0.75,
+            _ => 1.0,
+        };
+        target = ((target as f64) * mem_scale).round().max(1.0) as usize;
+    }
+
+    target.max(caps.min).min(caps.max).min(pending.max(1))
+}
+
+fn parse_meminfo_bytes(content: &str, key: &str) -> Option<u64> {
+    content
+        .lines()
+        .find(|line| line.starts_with(key))
+        .and_then(|line| line.split_whitespace().nth(1))
+        .and_then(|value| value.parse::<u64>().ok())
+        .map(|kb| kb * 1024)
+}
+
 pub fn cached_artifact_path(
     cache_dir: &Path,
     url: &str,
@@ -350,6 +629,22 @@ fn default_concurrency() -> usize {
     8
 }
 
+fn default_dynamic_mode() -> DynamicMode {
+    DynamicMode::SharedServer
+}
+
+fn default_rebalance_interval_ms() -> u64 {
+    1_500
+}
+
+fn default_dynamic_max_concurrency(total_packages: usize) -> usize {
+    let cpu_bound = std::thread::available_parallelism()
+        .map(|value| value.get().saturating_mul(2))
+        .unwrap_or(8)
+        .max(2);
+    cpu_bound.min(total_packages.max(1))
+}
+
 fn default_algorithm() -> String {
     "sha256".to_string()
 }
@@ -382,6 +677,7 @@ mod tests {
         let request = FetchRequest {
             cache_dir: cache_dir.path().to_path_buf(),
             concurrency: 4,
+            dynamic: None,
             packages: vec![PackageRequest {
                 package: "pkgA".to_string(),
                 version: Some("1.0.0".to_string()),
@@ -410,6 +706,7 @@ mod tests {
         let request = FetchRequest {
             cache_dir: cache_dir.path().to_path_buf(),
             concurrency: 2,
+            dynamic: None,
             packages: vec![PackageRequest {
                 package: "pkgB".to_string(),
                 version: None,
@@ -452,6 +749,7 @@ mod tests {
             .fetch_all(FetchRequest {
                 cache_dir: cache_dir.path().to_path_buf(),
                 concurrency: 2,
+                dynamic: None,
                 packages: vec![PackageRequest {
                     package: "pkgC".to_string(),
                     version: Some("1.0.0".to_string()),
