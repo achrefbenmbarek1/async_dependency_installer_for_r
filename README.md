@@ -8,6 +8,110 @@
 
 The lower-level Rust fetcher is still part of the repository and can be used directly, but the main product surface is the `du_hast_r` CLI.
 
+## Development setup with Nix
+
+Install Nix first using the official docs:
+
+- install: <https://nixos.org/download/>
+- flakes / `nix develop` reference: <https://nix.dev/manual/nix/latest/command-ref/new-cli/nix3-develop>
+
+Make sure `nix-command` and `flakes` are enabled in your Nix configuration, then enter the repo root and start the dev shell:
+
+```bash
+nix develop flake.nix
+```
+
+The flake already provides the packages needed to build and run the Rust tool and R helper flow, including:
+
+- Rust toolchain: `cargo`, `rustc`, `clippy`, `rustfmt`
+- build tooling and native libs: `pkg-config`, `cmake`, `gnumake`, `gcc`, `gfortran`, `openssl`, `curl`, `libxml2`, `sqlite`, `icu`, image/font libraries, and related dependencies often needed by R packages
+- R environment: `R` plus `BiocManager` and `jsonlite`
+- caching: `ccache`, wired in automatically for both compiler and Rust rebuilds via the shell environment
+
+The dev shell also sets up repo-local caches and convenience defaults automatically:
+
+- `ccache` works without extra configuration and stores its cache in `./.ccache`
+- `CARGO_HOME` is redirected to `./.cargo-home`
+- the shell config is intended to expose `target/debug`, but in practice the most reliable workflow is still to build explicitly and export it yourself
+
+For normal repo-local development, you do not need `cargo install --path .`. Build the binaries from the repo root with:
+
+```bash
+cargo build --bin du_hast_r --bin async_dependency_installer_for_R
+export PATH="$PWD/target/debug:$PATH"
+```
+
+If you work on the repo regularly, add that `export PATH="$PWD/target/debug:$PATH"` line to your shell startup file such as `~/.zshrc`, `~/.bashrc`, or the equivalent for your shell. The benefit is simple: every new shell session started from the repo can find `du_hast_r` and `async_dependency_installer_for_R` immediately, without re-exporting `PATH` by hand.
+
+`du_hast_r` is the main CLI. `async_dependency_installer_for_R` is still needed for the lower-level fetcher contract, the R shim in `R/async_install.R`, and the benchmark scripts, so building both is the safest default for contributors.
+
+The CLI also supports shell completion generation, which is useful once `target/debug` is on your `PATH`.
+
+## Recommended safety setup: zram
+
+Large Rust builds and heavy R dependency installs can hit memory pressure. A compressed zram swap device is a good safety measure because it reduces the chance of OOM kills while keeping swap fast enough for bursty workloads.
+
+Install `zram-generator` for your distro:
+
+- Arch Linux:
+
+  ```bash
+  sudo pacman -S zram-generator
+  ```
+
+- Ubuntu:
+
+  ```bash
+  sudo apt install systemd-zram-generator
+  ```
+
+- Fedora:
+
+  ```bash
+  sudo dnf install zram-generator
+  ```
+
+Then create `/etc/systemd/zram-generator.conf` with:
+
+```ini
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+```
+
+One way to write it:
+
+```bash
+sudo tee /etc/systemd/zram-generator.conf >/dev/null <<'EOF'
+[zram0]
+zram-size = ram / 2
+compression-algorithm = zstd
+swap-priority = 100
+fs-type = swap
+EOF
+```
+
+Enable it now and on future boots:
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now systemd-zram-setup@zram0.service
+```
+
+Verify it is active:
+
+```bash
+swapon --show
+zramctl
+```
+
+If your distro exposes the generated device directly, `sudo systemctl start /dev/zram0` is an equivalent one-shot activation path. Upstream docs:
+
+- zram-generator project: <https://github.com/systemd/zram-generator>
+- config reference: <https://man.archlinux.org/man/zram-generator.conf.5>
+
 ## Fetcher contract
 
 Pass a JSON request on `stdin` or as the first positional argument. The response is emitted as JSON on `stdout`, or written to `--output <path>`.
@@ -119,6 +223,29 @@ Generate shell completion scripts:
 du_hast_r completions zsh > _du_hast_r
 du_hast_r completions bash > du_hast_r.bash
 ```
+
+To keep completions available across shell sessions, generate the matching file once and load it from your shell config. The directories below are conventional user-managed locations, not something this project installs for you. Create them first if they do not exist.
+
+```bash
+mkdir -p ~/.zfunc
+du_hast_r completions zsh > ~/.zfunc/du_hast_r_completion
+```
+
+Then make sure your `~/.zshrc` includes a `fpath` entry for that directory before `compinit`, for example:
+
+```bash
+fpath=(~/.zfunc $fpath)
+autoload -Uz compinit && compinit
+```
+
+For Bash:
+
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+du_hast_r completions bash > ~/.local/share/bash-completion/completions/du_hast_r
+```
+
+Then source that file from `~/.bashrc`, or rely on your distro's standard `bash-completion` loader if it already scans that directory. If Bash completions still do not load automatically, make sure the `bash-completion` package is installed on your system.
 
 Example `fer.json`:
 
