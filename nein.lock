@@ -1,9 +1,14 @@
 {
-  "generated_at_utc": "2026-03-21 21:21:07 UTC",
+  "generated_at_utc": "2026-03-22 21:59:40 UTC",
   "lock_version": 1,
   "manifest_path": "fer.json",
-  "manifest_sha256": "771c99a110ed500d3fd73e435e6d794153ee4ed5c853305a601be9d7c830bd66",
+  "manifest_sha256": "ddd6edc61d8409f58681c7b75d5ab6681d156b8211fde84ec9e0a9a42e4bb4ab",
   "plan": {
+    "edges": {
+      "cli": [],
+      "digest": [],
+      "jsonlite": []
+    },
     "layers": [
       [
         "cli",

@@ -118,6 +118,10 @@ struct ManifestSettings {
     install_ncpus: usize,
     #[serde(default = "default_make_jobs")]
     make_jobs: usize,
+    #[serde(default = "default_lib_path")]
+    lib: String,
+    #[serde(default = "default_cache_dir")]
+    cache_dir: String,
     #[serde(default)]
     repos: BTreeMap<String, String>,
 }
@@ -435,6 +439,8 @@ impl Default for ManifestSettings {
             download_threads: default_download_threads(),
             install_ncpus: default_install_ncpus(),
             make_jobs: default_make_jobs(),
+            lib: default_lib_path(),
+            cache_dir: default_cache_dir(),
             repos: BTreeMap::new(),
         }
     }
@@ -473,6 +479,12 @@ fn default_install_ncpus() -> usize {
 }
 fn default_make_jobs() -> usize {
     num_cpus::get_physical().min(8)
+}
+fn default_lib_path() -> String {
+    "./.du_hast_r/library".to_string()
+}
+fn default_cache_dir() -> String {
+    "~/.cache/du_hast_r".to_string()
 }
 
 fn main() {

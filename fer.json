@@ -7,6 +7,8 @@
     "download_threads": 16,
     "install_ncpus": 2,
     "make_jobs": 4,
+    "lib": "./.du_hast_r/library",
+    "cache_dir": "~/.cache/du_hast_r",
     "repos": {}
   },
   "dependencies": {

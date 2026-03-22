@@ -138,7 +138,8 @@ Example `fer.json`:
     "download_threads": 16,
     "install_ncpus": 4,
     "make_jobs": 4,
-    "lib": "/path/to/your/R/library"
+    "lib": "./.du_hast_r/library",
+    "cache_dir": "~/.cache/du_hast_r"
   },
   "dependencies": {
     "BiocGenerics": "0.56.0",
@@ -159,6 +160,8 @@ When `settings.dynamics` is `true`, those fixed values are ignored at runtime an
 
 - `shared_server`: leaves more CPU and memory headroom
 - `dedicated_builder`: pushes harder for throughput on a mostly dedicated machine
+
+By default, new manifests use a project-local install library (`./.du_hast_r/library`) and a shared artifact cache (`~/.cache/du_hast_r`). Edit either path in `fer.json` if you want fully local or fully global behavior.
 
 Install location precedence for `du_hast_r gefragt`:
 - `settings.lib` in `fer.json` (if set and writable)
