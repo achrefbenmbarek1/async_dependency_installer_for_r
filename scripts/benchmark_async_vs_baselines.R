@@ -424,7 +424,7 @@ write_du_hast_manifest <- function(path,
   write_json(manifest, path = path, pretty = TRUE, auto_unbox = TRUE, null = "null")
 }
 
-run_du_hast_cli <- function(packages, env_paths, cfg, dynamic_mode) {
+run_du_hast_cli <- function(packages, env_paths, cfg, dynamic_mode, log_path = NULL) {
   cli <- cfg$du_hast_cli %||% "./target/debug/du_hast_r"
   fetcher <- cfg$fetcher
   manifest_path <- file.path(env_paths$project_dir, "fer.json")
@@ -448,6 +448,10 @@ run_du_hast_cli <- function(packages, env_paths, cfg, dynamic_mode) {
     fetcher
   )
   output <- system2(cli, args = args, stdout = TRUE, stderr = TRUE)
+  if (!is.null(log_path)) {
+    dir.create(dirname(log_path), recursive = TRUE, showWarnings = FALSE)
+    writeLines(output, log_path)
+  }
   status <- attr(output, "status")
   if (!is.null(status) && status != 0) {
     stop(paste(output, collapse = "\n"), call. = FALSE)
@@ -537,14 +541,16 @@ run_single_scenario <- function(stack_name,
         packages = packages,
         env_paths = env_paths,
         cfg = cfg,
-        dynamic_mode = "shared_server"
+        dynamic_mode = "shared_server",
+        log_path = file.path(benchmark_root, "raw_logs", stack_name, method, sprintf("rep_%02d_%s.log", repetition, cache_state))
       )
     } else if (method == "du_hast_dynamic_dedicated") {
       run_du_hast_cli(
         packages = packages,
         env_paths = env_paths,
         cfg = cfg,
-        dynamic_mode = "dedicated_builder"
+        dynamic_mode = "dedicated_builder",
+        log_path = file.path(benchmark_root, "raw_logs", stack_name, method, sprintf("rep_%02d_%s.log", repetition, cache_state))
       )
     } else {
       stop(sprintf("Unknown method: %s", method), call. = FALSE)

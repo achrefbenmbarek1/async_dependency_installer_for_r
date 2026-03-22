@@ -250,6 +250,14 @@ Run a tighter single-cell comparison focused on `tuned` versus `du_hast_dynamic_
 Rscript scripts/benchmark_async_vs_baselines.R scripts/benchmark_config_cli_dynamic_singlecell_dedicated.json
 ```
 
+Run a 3-repetition confirmation benchmark for that same dedicated single-cell comparison:
+
+```bash
+Rscript scripts/benchmark_async_vs_baselines.R scripts/benchmark_config_cli_dynamic_singlecell_dedicated_confirm.json
+```
+
+On the `singlecell_realistic` cold benchmark (`Seurat`, `SingleCellExperiment`, `scater`, `scran`, `DropletUtils`, `BiocParallel`), `du_hast_dynamic_dedicated` consistently outperformed the tuned baseline across 3 repetitions. Median total time dropped from `1704.8s` to `1017.8s`, a `40.3%` improvement (`1.67x` as fast). The win held across both phases: mean download time fell from about `73.6s` to `38.6s` (`47.6%` faster), and mean install time fell from about `1629.5s` to `980.7s` (`39.8%` faster).
+
 Summarize results:
 
 ```bash

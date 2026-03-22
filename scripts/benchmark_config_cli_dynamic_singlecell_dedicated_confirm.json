@@ -1,0 +1,31 @@
+{
+  "du_hast_cli": "./target/debug/du_hast_r",
+  "fetcher": "./target/debug/async_dependency_installer_for_R",
+  "include_bioconductor": true,
+  "dependency_fields": ["Depends", "Imports", "LinkingTo"],
+  "include_suggests": false,
+  "download_concurrency": 16,
+  "install_ncpus": 2,
+  "make_jobs": 4,
+  "methods": ["tuned", "du_hast_dynamic_dedicated"],
+  "cache_states": ["cold"],
+  "repetitions": 3,
+  "stop_on_error": false,
+  "disk_guard": {
+    "min_free_gb": 25
+  },
+  "cleanup": {
+    "enabled": true,
+    "on_failure": false
+  },
+  "stacks": {
+    "singlecell_realistic": [
+      "Seurat",
+      "SingleCellExperiment",
+      "scater",
+      "scran",
+      "DropletUtils",
+      "BiocParallel"
+    ]
+  }
+}

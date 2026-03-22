@@ -146,6 +146,8 @@ struct RunnerEvent {
     #[serde(default)]
     threads: Option<u64>,
     #[serde(default)]
+    make_jobs: Option<u64>,
+    #[serde(default)]
     layers: Option<u64>,
     #[serde(default)]
     layer: Option<u64>,
@@ -165,6 +167,12 @@ struct RunnerEvent {
     total_seconds: Option<f64>,
     #[serde(default)]
     lib: Option<String>,
+    #[serde(default)]
+    package: Option<String>,
+    #[serde(default)]
+    mem_available_ratio: Option<f64>,
+    #[serde(default)]
+    swap_used_ratio: Option<f64>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -1054,6 +1062,23 @@ fn apply_event(
                 total
             ));
         }
+        ("install", "package_start") => {
+            let pkg = event.package.as_deref().unwrap_or("package");
+            let workers = event.threads.unwrap_or(1);
+            let make_jobs = event.make_jobs.unwrap_or(1);
+            install_pb.set_message(format!("starting {pkg} | workers {workers} | make -j{make_jobs}"));
+        }
+        ("install", "package_done") => {
+            let pkg = event.package.as_deref().unwrap_or("package");
+            install_pb.set_message(format!(
+                "finished {pkg} in {:.2}s",
+                event.seconds.unwrap_or(0.0)
+            ));
+        }
+        ("install", "package_fail") => {
+            let pkg = event.package.as_deref().unwrap_or("package");
+            install_pb.set_message(format!("failed {pkg}"));
+        }
         ("install", "done") => {
             install_pb.set_position(100);
             install_pb.set_message(format!("installed in {:.2}s", event.seconds.unwrap_or(0.0)));
@@ -1139,6 +1164,39 @@ fn apply_event_tui(event: &RunnerEvent, state: &mut TuiState) {
                 done,
                 total
             );
+        }
+        ("install", "package_start") => {
+            if let Some(pkg) = &event.package {
+                state.current_package = Some(pkg.clone());
+                let entry = state.packages.entry(pkg.clone()).or_default();
+                entry.installing = true;
+                entry.compiling = false;
+                entry.last_note = format!(
+                    "workers={} make -j{}",
+                    event.threads.unwrap_or(1),
+                    event.make_jobs.unwrap_or(1)
+                );
+                state.phase_message = format!("starting {}", pkg);
+            }
+        }
+        ("install", "package_done") => {
+            if let Some(pkg) = &event.package {
+                let entry = state.packages.entry(pkg.clone()).or_default();
+                entry.done = true;
+                entry.installing = false;
+                entry.compiling = false;
+                entry.last_note = format!("installed in {:.2}s", event.seconds.unwrap_or(0.0));
+                state.phase_message = format!("finished {}", pkg);
+            }
+        }
+        ("install", "package_fail") => {
+            if let Some(pkg) = &event.package {
+                let entry = state.packages.entry(pkg.clone()).or_default();
+                entry.installing = false;
+                entry.compiling = false;
+                entry.last_note = "failed".to_string();
+                state.phase_message = format!("failed {}", pkg);
+            }
         }
         ("install", "done") => {
             state.install_pct = 100;

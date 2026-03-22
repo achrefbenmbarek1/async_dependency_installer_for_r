@@ -118,6 +118,7 @@ plan_to_lock <- function(plan, manifest) {
     requested_versions = manifest$dependencies,
     plan = list(
       layers = plan$layers,
+      edges = plan$edges,
       packages = unname(plan$package_specs)
     )
   )
@@ -150,9 +151,23 @@ lock_to_plan <- function(lock) {
 
   list(
     layers = lock$plan$layers,
+    edges = if (!is.null(lock$plan$edges)) lock$plan$edges else derive_layer_edges(lock$plan$layers),
     package_specs = package_specs,
     repos = repos
   )
+}
+
+derive_layer_edges <- function(layers) {
+  packages <- unique(unlist(layers))
+  edges <- setNames(vector("list", length(packages)), packages)
+  seen <- character()
+  for (layer in layers) {
+    for (pkg in layer) {
+      edges[[pkg]] <- seen
+    }
+    seen <- c(seen, layer)
+  }
+  edges
 }
 
 normalize_dynamic_mode <- function(value) {
@@ -374,74 +389,223 @@ with_make_jobs <- function(make_jobs, code) {
   force(code)
 }
 
-install_layer_batches <- function(layer,
-                                  layer_index,
-                                  total_layers,
-                                  results,
-                                  target_lib,
-                                  manifest,
-                                  dynamics_enabled,
-                                  fixed_install_ncpus,
-                                  fixed_make_jobs,
-                                  completed_packages,
-                                  total_packages) {
-  remaining <- layer
-  while (length(remaining) > 0) {
+safe_pkg_filename <- function(pkg) {
+  gsub("[^A-Za-z0-9_.-]+", "_", pkg)
+}
+
+build_install_graph <- function(plan) {
+  packages <- names(plan$package_specs)
+  edges <- plan$edges %||% derive_layer_edges(plan$layers)
+  normalized_edges <- setNames(vector("list", length(packages)), packages)
+  for (pkg in packages) {
+    deps <- edges[[pkg]] %||% character()
+    if (is.list(deps)) {
+      deps <- unlist(deps, use.names = FALSE)
+    }
+    deps <- as.character(deps %||% character())
+    deps <- deps[nzchar(deps)]
+    normalized_edges[[pkg]] <- sort(unique(intersect(deps, packages)))
+  }
+
+  reverse_edges <- setNames(vector("list", length(packages)), packages)
+  for (pkg in packages) {
+    for (dep in normalized_edges[[pkg]]) {
+      reverse_edges[[dep]] <- sort(unique(c(reverse_edges[[dep]], pkg)))
+    }
+  }
+
+  remaining <- setNames(vapply(normalized_edges, length, integer(1)), names(normalized_edges))
+  list(
+    edges = normalized_edges,
+    reverse_edges = reverse_edges,
+    remaining = remaining,
+    ready = sort(names(remaining)[remaining == 0L]),
+    completed = character(),
+    failed = character()
+  )
+}
+
+install_one_package <- function(pkg, path, target_lib, make_jobs, log_path) {
+  dir.create(dirname(log_path), recursive = TRUE, showWarnings = FALSE)
+  log_con <- file(log_path, open = "at")
+  sink(log_con, split = FALSE)
+  sink(log_con, type = "message")
+  on.exit({
+    sink(type = "message")
+    sink()
+    close(log_con)
+  }, add = TRUE)
+
+  result <- tryCatch({
+    elapsed <- system.time({
+      with_make_jobs(make_jobs, {
+        utils::install.packages(
+          path,
+          repos = NULL,
+          type = "source",
+          Ncpus = 1L,
+          lib = target_lib
+        )
+      })
+    })[["elapsed"]]
+    list(ok = TRUE, package = pkg, seconds = as.numeric(elapsed), error_message = NA_character_)
+  }, error = function(e) {
+    list(ok = FALSE, package = pkg, seconds = NA_real_, error_message = conditionMessage(e))
+  })
+
+  flush(log_con)
+  result
+}
+
+kill_install_jobs <- function(active) {
+  for (entry in active) {
+    pid <- entry$job$pid %||% NA_integer_
+    if (!is.na(pid)) {
+      suppressWarnings(tools::pskill(pid, 15L))
+    }
+  }
+  invisible(NULL)
+}
+
+install_with_scheduler <- function(plan,
+                                   results,
+                                   target_lib,
+                                   manifest,
+                                   dynamics_enabled,
+                                   fixed_install_ncpus,
+                                   fixed_make_jobs,
+                                   total_packages,
+                                   log_dir) {
+  graph <- build_install_graph(plan)
+  active <- list()
+  package_layer <- setNames(integer(0), character(0))
+  for (idx in seq_along(plan$layers)) {
+    for (pkg in plan$layers[[idx]]) {
+      package_layer[[pkg]] <- idx
+    }
+  }
+
+  completed_packages <- 0L
+  while (completed_packages < total_packages) {
     runtime <- if (dynamics_enabled) {
-      resolve_install_runtime(manifest, length(remaining))
+      resolve_install_runtime(manifest, max(1L, length(graph$ready)))
     } else {
       list(
         install_ncpus = as.integer(fixed_install_ncpus),
         make_jobs = as.integer(fixed_make_jobs),
-        batch_size = length(remaining)
+        pressure = NULL
       )
     }
 
-    batch <- remaining[seq_len(min(length(remaining), runtime$batch_size))]
-    local_paths <- vapply(batch, function(pkg) results[[pkg]]$status$path, "")
-    emit_event(
-      "install",
-      "batch",
-      layer = as.integer(layer_index),
-      layers = as.integer(total_layers),
-      packages = as.integer(length(batch)),
-      threads = as.integer(runtime$install_ncpus),
-      make_jobs = as.integer(runtime$make_jobs),
-      mem_available_ratio = if (!is.null(runtime$pressure)) runtime$pressure$available_ratio else NA_real_,
-      swap_used_ratio = if (!is.null(runtime$pressure)) runtime$pressure$swap_used_ratio else NA_real_,
-      message = sprintf(
-        paste0(
-          "installing batch of %d package(s) with Ncpus=%d MAKEFLAGS=-j%d",
-          " | mem_avail=%s swap_used=%s"
-        ),
-        length(batch),
-        runtime$install_ncpus,
-        runtime$make_jobs,
-        if (!is.null(runtime$pressure)) format_percent(runtime$pressure$available_ratio) else "n/a",
-        if (!is.null(runtime$pressure)) format_percent(runtime$pressure$swap_used_ratio) else "n/a"
+    worker_limit <- max(1L, as.integer(runtime$install_ncpus))
+    while (length(active) < worker_limit && length(graph$ready) > 0) {
+      pkg <- graph$ready[[1]]
+      graph$ready <- graph$ready[-1]
+      local_path <- results[[pkg]]$status$path
+      log_path <- file.path(log_dir, sprintf("%03d_%s.log", completed_packages + length(active) + 1L, safe_pkg_filename(pkg)))
+      emit_event(
+        "install",
+        "package_start",
+        package = pkg,
+        layer = as.integer(package_layer[[pkg]] %||% 0L),
+        layers = as.integer(length(plan$layers)),
+        threads = as.integer(worker_limit),
+        make_jobs = as.integer(runtime$make_jobs),
+        mem_available_ratio = if (!is.null(runtime$pressure)) runtime$pressure$available_ratio else NA_real_,
+        swap_used_ratio = if (!is.null(runtime$pressure)) runtime$pressure$swap_used_ratio else NA_real_,
+        message = sprintf(
+          "starting %s with worker_limit=%d MAKEFLAGS=-j%d | mem_avail=%s swap_used=%s",
+          pkg,
+          worker_limit,
+          runtime$make_jobs,
+          if (!is.null(runtime$pressure)) format_percent(runtime$pressure$available_ratio) else "n/a",
+          if (!is.null(runtime$pressure)) format_percent(runtime$pressure$swap_used_ratio) else "n/a"
+        )
       )
-    )
-
-    with_make_jobs(runtime$make_jobs, {
-      utils::install.packages(
-        local_paths,
-        repos = NULL,
-        type = "source",
-        Ncpus = as.integer(runtime$install_ncpus),
-        lib = target_lib
+      job <- parallel::mcparallel(
+        install_one_package(pkg, local_path, target_lib, runtime$make_jobs, log_path),
+        silent = TRUE
       )
-    })
+      active[[pkg]] <- list(job = job, runtime = runtime, log_path = log_path)
+    }
 
-    completed_packages <- completed_packages + length(batch)
-    emit_event(
-      "install",
-      "progress",
-      layer = as.integer(layer_index),
-      layers = as.integer(total_layers),
-      completed_packages = as.integer(completed_packages),
-      total_packages = as.integer(total_packages)
-    )
-    remaining <- remaining[-seq_len(length(batch))]
+    if (length(active) == 0) {
+      if (length(graph$ready) == 0) {
+        stop("Install scheduler stalled with no ready or active packages", call. = FALSE)
+      }
+      Sys.sleep(0.2)
+      next
+    }
+
+    jobs <- lapply(active, `[[`, "job")
+    names(jobs) <- names(active)
+    completed_jobs <- parallel::mccollect(jobs, wait = FALSE, timeout = 0.5)
+    if (is.null(completed_jobs)) {
+      next
+    }
+
+    for (job_name in names(completed_jobs)) {
+      result <- completed_jobs[[job_name]]
+      pkg <- result$package %||% job_name
+      runtime <- active[[pkg]]$runtime
+      active[[pkg]] <- NULL
+
+      if (is.null(result) || !isTRUE(result$ok)) {
+        error_message <- if (is.null(result)) {
+          "install worker exited without a result"
+        } else {
+          result$error_message %||% "unknown install failure"
+        }
+        emit_event(
+          "install",
+          "package_fail",
+          package = pkg,
+          layer = as.integer(package_layer[[pkg]] %||% 0L),
+          layers = as.integer(length(plan$layers)),
+          threads = as.integer(runtime$install_ncpus %||% 1L),
+          make_jobs = as.integer(runtime$make_jobs %||% 1L),
+          message = sprintf("package %s failed: %s", pkg, error_message)
+        )
+        if (length(active) > 0) {
+          kill_install_jobs(active)
+        }
+        stop(sprintf("Install failed for %s: %s", pkg, error_message), call. = FALSE)
+      }
+
+      completed_packages <- completed_packages + 1L
+      graph$completed <- c(graph$completed, pkg)
+      emit_event(
+        "install",
+        "package_done",
+        package = pkg,
+        layer = as.integer(package_layer[[pkg]] %||% 0L),
+        layers = as.integer(length(plan$layers)),
+        seconds = as.numeric(result$seconds %||% NA_real_),
+        threads = as.integer(runtime$install_ncpus %||% 1L),
+        make_jobs = as.integer(runtime$make_jobs %||% 1L),
+        mem_available_ratio = if (!is.null(runtime$pressure)) runtime$pressure$available_ratio else NA_real_,
+        swap_used_ratio = if (!is.null(runtime$pressure)) runtime$pressure$swap_used_ratio else NA_real_,
+        message = sprintf("installed %s in %.2fs", pkg, as.numeric(result$seconds %||% 0))
+      )
+
+      for (dependent in graph$reverse_edges[[pkg]] %||% character()) {
+        graph$remaining[[dependent]] <- max(0L, graph$remaining[[dependent]] - 1L)
+        if (graph$remaining[[dependent]] == 0L && !dependent %in% names(active) &&
+            !dependent %in% graph$completed && !dependent %in% graph$ready) {
+          graph$ready <- sort(c(graph$ready, dependent))
+        }
+      }
+
+      emit_event(
+        "install",
+        "progress",
+        layer = as.integer(package_layer[[pkg]] %||% 0L),
+        layers = as.integer(length(plan$layers)),
+        completed_packages = as.integer(completed_packages),
+        total_packages = as.integer(total_packages),
+        message = sprintf("completed %s (%d/%d)", pkg, completed_packages, total_packages)
+      )
+    }
   }
 
   completed_packages
@@ -530,6 +694,8 @@ if (mode == "lock") {
 
   target_lib <- resolve_install_library(lib)
   emit_event("install", "target", lib = target_lib, message = sprintf("installing into %s", target_lib))
+  install_log_dir <- file.path(dirname(manifest_path), "install_logs")
+  dir.create(install_log_dir, recursive = TRUE, showWarnings = FALSE)
 
   total_packages <- length(plan$package_specs)
   install_start_threads <- if (dynamics_enabled) {
@@ -546,22 +712,17 @@ if (mode == "lock") {
   )
   completed_packages <- 0L
   t_install <- system.time({
-    for (idx in seq_along(plan$layers)) {
-      layer <- plan$layers[[idx]]
-      completed_packages <- install_layer_batches(
-        layer = layer,
-        layer_index = idx,
-        total_layers = length(plan$layers),
-        results = results,
-        target_lib = target_lib,
-        manifest = manifest,
-        dynamics_enabled = dynamics_enabled,
-        fixed_install_ncpus = install_ncpus,
-        fixed_make_jobs = make_jobs,
-        completed_packages = completed_packages,
-        total_packages = total_packages
-      )
-    } 
+    completed_packages <- install_with_scheduler(
+      plan = plan,
+      results = results,
+      target_lib = target_lib,
+      manifest = manifest,
+      dynamics_enabled = dynamics_enabled,
+      fixed_install_ncpus = install_ncpus,
+      fixed_make_jobs = make_jobs,
+      total_packages = total_packages,
+      log_dir = install_log_dir
+    )
   })[["elapsed"]]
 
   emit_event("install", "done", seconds = as.numeric(t_install))
